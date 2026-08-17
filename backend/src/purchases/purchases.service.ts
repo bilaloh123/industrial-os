@@ -214,7 +214,9 @@ export class PurchasesService {
     await this.prisma.auditLog.create({
       data: {
         companyId, userId: actorId, action: 'UPDATE', entity: 'PurchaseOrder', entityId: id,
-        newValue: { received: dto.lines, status: updated.status },
+        // Plain-serialize the DTO array — Prisma's Json field type requires
+        // structurally plain JSON values, not class-shaped DTO instances.
+        newValue: { received: JSON.parse(JSON.stringify(dto.lines)), status: updated.status },
       },
     });
 
