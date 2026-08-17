@@ -5,6 +5,7 @@
   "description": "INDUSTRIAL OS — Backend API (NestJS + Prisma + PostgreSQL)",
   "scripts": {
     "build": "nest build",
+    "postinstall": "prisma generate",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
