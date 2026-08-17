@@ -1,0 +1,1040 @@
+// ============================================================
+// INDUSTRIAL OS — DATABASE SCHEMA
+// PHASE 1: Companies, Users, Roles, Permissions, Sessions
+// Multi-tenant. Every business record is scoped by companyId.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------
+// COMPANY (Tenant root — PHASE 3 / PHASE 8)
+// ------------------------------------------------------------
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  logoUrl   String?
+  address   String?
+  ice       String? // Identifiant Commun de l'Entreprise
+  ifNumber  String? // Identifiant Fiscal
+  rc        String? // Registre de Commerce
+  tp        String? // Taxe Professionnelle
+  phone     String?
+  email     String?
+  website   String?
+
+  defaultCurrency String @default("MAD")
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users       User[]
+  roles       Role[]
+  sessions    Session[]
+  loginEvents LoginEvent[]
+  auditLogs   AuditLog[]
+
+  brands               Brand[]
+  productCategories    ProductCategory[]
+  attributeDefinitions AttributeDefinition[]
+  products             Product[]
+
+  warehouses     Warehouse[]
+  stockMovements StockMovement[]
+  stockReservations StockReservation[]
+
+  customers   Customer[]
+  salesOrders SalesOrder[]
+
+  suppliers      Supplier[]
+  purchaseOrders PurchaseOrder[]
+
+  invoices Invoice[]
+  payments Payment[]
+
+  bills            Bill[]
+  supplierPayments SupplierPayment[]
+  imports          Import[]
+  supplierProductOffers SupplierProductOffer[]
+
+  drivers   Driver[]
+  deliveries Delivery[]
+
+  @@map("companies")
+}
+
+// ------------------------------------------------------------
+// USERS & AUTH (PHASE 4)
+// ------------------------------------------------------------
+model User {
+  id           String  @id @default(cuid())
+  companyId    String
+  company      Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  email        String
+  passwordHash String
+  firstName    String
+  lastName     String
+  phone        String?
+  avatarUrl    String?
+
+  // MFA-ready
+  mfaEnabled     Boolean @default(false)
+  mfaSecret      String?
+
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
+
+  // Soft delete (PHASE 60)
+  deletedAt DateTime?
+
+  roles        UserRole[]
+  sessions     Session[]
+  loginEvents  LoginEvent[]
+  passwordResets PasswordReset[]
+  auditLogs    AuditLog[] @relation("AuditLogUser")
+
+  // one email per company (multi-tenant uniqueness, not global)
+  @@unique([companyId, email])
+  @@index([companyId])
+  @@map("users")
+}
+
+// ------------------------------------------------------------
+// ROLES & PERMISSIONS — RBAC (PHASE 4 / PHASE 5)
+// ------------------------------------------------------------
+enum RoleCode {
+  SUPER_ADMIN
+  DIRECTOR
+  PURCHASING_MANAGER
+  IMPORT_MANAGER
+  WAREHOUSE_MANAGER
+  WAREHOUSE_OPERATOR
+  SALES_MANAGER
+  SALES_REP
+  ACCOUNTANT
+  DELIVERY_MANAGER
+  TECHNICIAN
+  AUDITOR
+  READ_ONLY
+  CUSTOM
+}
+
+model Role {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code        RoleCode @default(CUSTOM)
+  name        String
+  description String?
+  isSystem    Boolean  @default(false) // system roles cannot be deleted
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("roles")
+}
+
+// Granular permission catalogue (PHASE 5), e.g. "products.view", "stock.adjust"
+model Permission {
+  id          String @id @default(cuid())
+  key         String @unique // e.g. products.view / stock.adjust / ai.financial_analysis
+  module      String // e.g. products, stock, sales, purchases, imports, finance, reports, ai, users
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String     @id @default(cuid())
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+}
+
+// ------------------------------------------------------------
+// SESSIONS / LOGIN HISTORY (PHASE 4)
+// ------------------------------------------------------------
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  tokenHash    String   @unique // hashed refresh/session token
+  userAgent    String?
+  ipAddress    String?
+  device       String?
+
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model LoginEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  email        String
+  success      Boolean
+  reason       String? // e.g. "invalid_password", "account_locked"
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@map("login_events")
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@map("password_resets")
+}
+
+// ------------------------------------------------------------
+// AUDIT LOG (PHASE 50) — append-only, never edited/deleted
+// ------------------------------------------------------------
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation("AuditLogUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  action    String   // LOGIN, LOGOUT, CREATE, UPDATE, APPROVAL, PERMISSION_CHANGE, ...
+  entity    String   // e.g. "User", "Role"
+  entityId  String?
+  oldValue  Json?
+  newValue  Json?
+  reason    String?
+  ipAddress String?
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// PHASE 4 — PRODUCT MASTER + DYNAMIC ATTRIBUTES ENGINE
+// (PHASE 9 / PHASE 10 / PHASE 11 of the product spec)
+// ============================================================
+
+model Brand {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products  Product[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("brands")
+}
+
+model ProductCategory {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String
+  parentId  String?
+  parent    ProductCategory?  @relation("CategoryParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children  ProductCategory[] @relation("CategoryParent")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attributeDefinitions AttributeDefinition[]
+  products             Product[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("product_categories")
+}
+
+enum AttributeType {
+  STRING
+  NUMBER
+  ENUM
+}
+
+// PHASE 10 — Dynamic Technical Attribute Engine.
+// Admin-defined per category (e.g. ROULEMENT -> Inner Diameter, Outer
+// Diameter, Width, Seal...) rather than hardcoded product columns.
+model AttributeDefinition {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  key       String // machine key, e.g. inner_diameter
+  label     String // display label, e.g. "القطر الداخلي"
+  type      AttributeType @default(STRING)
+  unit      String? // e.g. mm, bar
+
+  createdAt DateTime @default(now())
+
+  values ProductAttributeValue[]
+  variantValues VariantAttributeValue[]
+
+  @@unique([companyId, categoryId, key])
+  @@index([companyId])
+  @@map("attribute_definitions")
+}
+
+model Product {
+  id          String  @id @default(cuid())
+  companyId   String
+  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  internalRef String
+  supplierRef String?
+  barcode     String?
+
+  name        String
+  shortName   String?
+  description String?
+
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brandId    String?
+  brand      Brand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  unit            String  @default("PCE")
+  weight          Float?
+  countryOfOrigin String?
+  hsCode          String?
+
+  // Inventory forecasting inputs (PHASE 23) — used once the Stock module reads them
+  minStock     Int  @default(0)
+  maxStock     Int?
+  reorderPoint Int  @default(0)
+  safetyStock  Int  @default(0)
+  leadTimeDays Int?
+
+  // Landed cost + pricing (PHASE 17 / PHASE 25) — simple fields for now,
+  // full pricing engine and landed-cost allocation are later phases.
+  purchaseCost Float?
+  averageCost  Float?
+  lastCost     Float?
+  sellingPrice Float?
+  minMarginPercent Float? // PHASE 26 — selling below this triggers AUTHORIZATION REQUIRED
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  createdBy String?
+  updatedBy String?
+  deletedAt DateTime? // soft delete (PHASE 60)
+
+  attributeValues ProductAttributeValue[]
+  stockMovements  StockMovement[]
+  salesOrderItems SalesOrderItem[]
+  purchaseOrderItems PurchaseOrderItem[]
+  reservations    StockReservation[]
+  variants        ProductVariant[]
+  supplierOffers  SupplierProductOffer[]
+
+  @@unique([companyId, internalRef])
+  @@index([companyId])
+  @@map("products")
+}
+
+model ProductAttributeValue {
+  id                     String   @id @default(cuid())
+  productId              String
+  product                Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeDefinitionId  String
+  attributeDefinition    AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Cascade)
+
+  value String // stored as text; interpreted per AttributeDefinition.type
+
+  @@unique([productId, attributeDefinitionId])
+  @@map("product_attribute_values")
+}
+
+// ============================================================
+// PHASE 7 — WAREHOUSE / INVENTORY ENGINE
+// (PHASE 18 / PHASE 19 / PHASE 20 of the product spec)
+// ============================================================
+
+model Warehouse {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name    String
+  code    String
+  address String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  zones          WarehouseZone[]
+  stockMovements StockMovement[]
+  deliveries     Delivery[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("warehouses")
+}
+
+// Hierarchy: Warehouse -> Zone -> Rack -> Shelf -> Bin (PHASE 18)
+model WarehouseZone {
+  id          String    @id @default(cuid())
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  name        String
+  code        String
+  racks       Rack[]
+
+  @@unique([warehouseId, code])
+  @@map("warehouse_zones")
+}
+
+model Rack {
+  id     String        @id @default(cuid())
+  zoneId String
+  zone   WarehouseZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  name   String
+  code   String
+  shelves Shelf[]
+
+  @@unique([zoneId, code])
+  @@map("racks")
+}
+
+model Shelf {
+  id     String @id @default(cuid())
+  rackId String
+  rack   Rack   @relation(fields: [rackId], references: [id], onDelete: Cascade)
+  name   String
+  code   String
+  bins   Bin[]
+
+  @@unique([rackId, code])
+  @@map("shelves")
+}
+
+model Bin {
+  id      String @id @default(cuid())
+  shelfId String
+  shelf   Shelf  @relation(fields: [shelfId], references: [id], onDelete: Cascade)
+  name    String
+  code    String
+
+  stockMovements StockMovement[]
+
+  @@unique([shelfId, code])
+  @@map("bins")
+}
+
+enum StockMovementType {
+  PURCHASE_RECEIPT
+  SALE
+  RETURN_IN
+  RETURN_OUT
+  TRANSFER
+  ADJUSTMENT
+  DAMAGE
+  LOSS
+  INVENTORY_COUNT
+  INTERNAL_USE
+}
+
+// PHASE 19 — append-only Inventory Ledger. Rows are never updated or
+// deleted; any correction is expressed as a new movement. Current stock
+// is always the sum of quantity for a product (+warehouse), never a
+// separately-editable counter.
+model StockMovement {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  binId       String?
+  bin         Bin?     @relation(fields: [binId], references: [id], onDelete: SetNull)
+  variantId   String? // narrows tracking to a specific ProductVariant SKU when applicable
+  variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  type     StockMovementType
+  quantity Int // positive = stock in, negative = stock out
+  reason   String?
+  referenceDocument String? // e.g. "SO-4821", "PO-1190" — link to the originating document
+
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@index([companyId, productId])
+  @@index([companyId, warehouseId])
+  @@index([variantId])
+  @@map("stock_movements")
+}
+
+// ============================================================
+// PHASE 11 — SALES (Quotation -> Order -> Delivery -> Invoice)
+// (PHASE 13 / PHASE 24 / PHASE 26 of the product spec)
+// ============================================================
+
+model Customer {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name           String
+  ice            String?
+  address        String?
+  phone          String?
+  email          String?
+  paymentTerms   String?
+  creditLimit    Float?  @default(0)
+  currentBalance Float   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  salesOrders SalesOrder[]
+  invoices    Invoice[]
+
+  @@index([companyId])
+  @@map("customers")
+}
+
+enum SalesOrderStatus {
+  QUOTATION
+  READY
+  PICKING
+  PACKED
+  DISPATCHED
+  DELIVERED
+  INVOICED
+  CANCELLED
+}
+
+model SalesOrder {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  salesRepId String // userId of the sales representative
+  status     SalesOrderStatus @default(QUOTATION)
+  notes      String?
+  warehouseId String? // resolved at delivery time
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items SalesOrderItem[]
+  invoice Invoice?
+  reservations StockReservation[]
+  delivery Delivery?
+
+  @@index([companyId])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id           String     @id @default(cuid())
+  salesOrderId String
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId    String?
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  quantity        Int
+  unitPrice       Float // selling price at time of order
+  unitCost        Float // snapshot of product cost at time of order — basis for true margin (PHASE 17/26)
+  discountPercent Float @default(0)
+
+  @@map("sales_order_items")
+}
+
+// ============================================================
+// PHASE 8 — PURCHASING / SUPPLIERS
+// (PHASE 12 / PHASE 14 of the product spec)
+// ============================================================
+
+model Supplier {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name         String
+  country      String?
+  address      String?
+  email        String?
+  phone        String?
+  currency     String  @default("MAD")
+  paymentTerms String?
+  incoterm     String?
+  leadTimeDays Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseOrders PurchaseOrder[]
+  bills          Bill[]
+  productOffers  SupplierProductOffer[]
+
+  @@index([companyId])
+  @@map("suppliers")
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  RECEIVING
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  status       PurchaseOrderStatus @default(DRAFT)
+  currency     String  @default("MAD")
+  exchangeRate Float   @default(1)
+  expectedDate DateTime?
+  notes        String?
+  warehouseId  String? // destination warehouse, resolved at receiving time
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items PurchaseOrderItem[]
+  bill  Bill?
+  import Import?
+
+  @@index([companyId])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              String        @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId       String?
+  variant         ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  quantityOrdered  Int
+  quantityReceived Int   @default(0) // supports partial receipts (PHASE 14)
+  unitCost         Float // cost in the PO currency
+
+  @@map("purchase_order_items")
+}
+
+// ============================================================
+// PHASE 34 — FINANCIAL OPERATIONS (Customer Invoices + Payments)
+// (PHASE 34 / PHASE 37 of the product spec)
+// ============================================================
+
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id            String  @id @default(cuid())
+  companyId     String
+  company       Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  salesOrderId  String  @unique
+  salesOrder    SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  invoiceNumber String // sequential per company, e.g. "INV-2026-0001"
+  totalAmount   Float
+  costAmount    Float // snapshot for true-margin reporting (PHASE 17)
+  status        InvoiceStatus @default(UNPAID)
+  dueDate       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments Payment[]
+
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId])
+  @@map("invoices")
+}
+
+model Payment {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  amount    Float
+  method    String? // e.g. "bank_transfer", "cash", "check"
+  paidAt    DateTime @default(now())
+  createdBy String
+
+  @@index([companyId, invoiceId])
+  @@map("payments")
+}
+
+// ============================================================
+// STOCK RESERVATIONS — closes the "double-sell" gap identified in
+// docs/FULL-SYSTEM-AUDIT.md §5. Stock is now reserved the moment a
+// sales order is confirmed (QUOTATION -> READY), not just at delivery.
+// Available = On Hand - active Reservations (PHASE 20).
+// ============================================================
+model StockReservation {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  salesOrderId String
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+
+  quantity   Int
+  createdAt  DateTime  @default(now())
+  releasedAt DateTime? // set when the order is delivered (converted to a real movement) or cancelled
+
+  @@index([companyId, productId])
+  @@index([salesOrderId])
+  @@index([variantId])
+  @@map("stock_reservations")
+}
+
+// ============================================================
+// SUPPLIER BILLS + PAYMENTS — mirrors customer Invoice/Payment (PHASE 34),
+// but for amounts owed TO suppliers instead of BY customers (Payables).
+// ============================================================
+enum BillStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+model Bill {
+  id              String        @id @default(cuid())
+  companyId       String
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  purchaseOrderId String        @unique
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  supplierId      String
+  supplier        Supplier      @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  billNumber  String // sequential per company, e.g. "BILL-2026-0001"
+  totalAmount Float
+  status      BillStatus @default(UNPAID)
+  dueDate     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  supplierPayments SupplierPayment[]
+
+  @@unique([companyId, billNumber])
+  @@index([companyId])
+  @@map("bills")
+}
+
+model SupplierPayment {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  billId    String
+  bill      Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  amount    Float
+  method    String?
+  paidAt    DateTime @default(now())
+  createdBy String
+
+  @@index([companyId, billId])
+  @@map("supplier_payments")
+}
+
+// ============================================================
+// IMPORT MANAGEMENT + TRUE LANDED COST (PHASE 16 / PHASE 17)
+// Closes the last high-priority gap in docs/FULL-SYSTEM-AUDIT.md §5.
+// Each Import is a dossier tied 1:1 to a PurchaseOrder — mirrors the
+// Invoice/Bill traceability pattern already used elsewhere.
+// ============================================================
+
+enum ImportStatus {
+  DRAFT
+  ORDERED
+  PREPARING
+  SHIPPED
+  AT_PORT
+  CUSTOMS
+  RELEASED
+  RECEIVING
+  RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+enum ImportExpenseType {
+  FREIGHT
+  INSURANCE
+  CUSTOMS
+  TRANSIT
+  PORT_FEES
+  HANDLING
+  BANK_FEES
+  DOCUMENTATION
+  STORAGE
+  OTHER
+}
+
+model Import {
+  id              String   @id @default(cuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  purchaseOrderId String   @unique
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+
+  importNumber      String // sequential per company, e.g. "IMP-2026-0001"
+  status             ImportStatus @default(DRAFT)
+  countryOfOrigin    String?
+  portOfDeparture    String?
+  portOfArrival      String?
+  carrier            String?
+  incoterm           String?
+  containerNumber    String?
+  blNumber           String?
+  shipmentDate       DateTime?
+  eta                DateTime?
+  arrivalDate        DateTime?
+  customsReleaseDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses ImportExpense[]
+
+  @@unique([companyId, importNumber])
+  @@index([companyId])
+  @@map("imports")
+}
+
+model ImportExpense {
+  id       String @id @default(cuid())
+  importId String
+  import   Import @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  type     ImportExpenseType
+  amount   Float
+  currency String @default("MAD")
+  notes    String?
+
+  createdAt DateTime @default(now())
+
+  @@map("import_expenses")
+}
+
+// ============================================================
+// PRODUCT VARIANTS (PHASE 9) — a product family (e.g. "Roulement 62xx")
+// can have several sellable SKUs that differ by specific attribute
+// values (e.g. inner diameter 25mm vs 30mm), each with its own stock
+// and pricing. Variant-level stock is tracked via the existing
+// StockMovement/StockReservation ledgers (variantId is optional there,
+// so non-variant products are completely unaffected).
+// ============================================================
+
+model ProductVariant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku          String  // distinct sellable reference, e.g. "RLM-6205-25"
+  sellingPrice Float?
+  purchaseCost Float?
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attributeValues VariantAttributeValue[]
+  stockMovements    StockMovement[]
+  stockReservations StockReservation[]
+  salesOrderItems   SalesOrderItem[]
+  purchaseOrderItems PurchaseOrderItem[]
+
+  @@unique([productId, sku])
+  @@index([productId])
+  @@map("product_variants")
+}
+
+model VariantAttributeValue {
+  id                    String         @id @default(cuid())
+  variantId             String
+  variant               ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attributeDefinitionId String
+  attributeDefinition   AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Cascade)
+
+  value String
+
+  @@unique([variantId, attributeDefinitionId])
+  @@map("variant_attribute_values")
+}
+
+// ============================================================
+// SUPPLIER COMPARISON ENGINE (PHASE 15) — a catalogue of price/lead-time
+// offers, one per (supplier, product), collected via RFQ or historical
+// negotiation. The comparison engine ranks these — NOT by price alone.
+// ============================================================
+model SupplierProductOffer {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  unitCost     Float
+  currency     String @default("MAD")
+  leadTimeDays Int?   // overrides the supplier's general lead time for this specific product, if known
+  notes        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([supplierId, productId])
+  @@index([companyId, productId])
+  @@map("supplier_product_offers")
+}
+
+// ============================================================
+// DELIVERY & DRIVERS — logistics layer on top of the sales workflow.
+// A Delivery represents one physical run (driver assigned to one
+// dispatched sales order); completing it triggers the real stock-out
+// movement via SalesService.deliver() — the same ledger everything
+// else uses, so a "delivered" order always means the warehouse
+// actually released the goods.
+// ============================================================
+
+model Driver {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name        String
+  phone       String?
+  vehicleInfo String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries Delivery[]
+
+  @@index([companyId])
+  @@map("drivers")
+}
+
+enum DeliveryStatus {
+  PENDING     // created, no driver assigned yet
+  ASSIGNED    // driver assigned, not yet on the road
+  IN_TRANSIT  // driver has left the warehouse
+  DELIVERED   // confirmed received — triggers the real stock movement
+  FAILED      // delivery attempt failed (customer absent, refused, etc.)
+}
+
+model Delivery {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  salesOrderId String  @unique
+  salesOrder  SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Restrict)
+  driverId    String?
+  driver      Driver?  @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  status        DeliveryStatus @default(PENDING)
+  address       String?
+  scheduledDate DateTime?
+  deliveredAt   DateTime?
+  recipientName String? // who actually received the goods (proof of delivery)
+  failureReason String?
+  notes         String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([driverId])
+  @@map("deliveries")
+}
